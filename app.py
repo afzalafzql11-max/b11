@@ -1,175 +1,319 @@
-const API = "https://b1-cedy.onrender.com";
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import os, sqlite3, cv2, numpy as np
+import smtplib
+from email.mime.text import MIMEText
 
-let userEmail = "";
-let isAdmin = false;
+app = Flask(__name__)
+CORS(app)
 
-/* PAGE SWITCH */
-function showPage(page){
-  document.querySelectorAll(".page").forEach(p=>p.style.display="none");
-  document.getElementById(page).style.display="block";
+UPLOAD_FOLDER = "uploads"
+DATASET = "dataset"
+DB = "database.db"
 
-  if(page==="dashboard") loadChildren();
-}
-showPage("login");
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(DATASET, exist_ok=True)
 
-/* SIGNUP */
-function signup(){
-  fetch(API+"/signup",{
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({
-      name: document.getElementById("su_name").value,
-      email: document.getElementById("su_email").value,
-      password: document.getElementById("su_pass").value
-    })
-  })
-  .then(r=>r.json())
-  .then(d=>{
-    alert(d.message || "Signup Done");
-    showPage("login");
-  });
-}
+# FACE DETECTOR
+face_cascade = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+)
 
-/* LOGIN */
-function login(){
-  fetch(API+"/login",{
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({
-      email: document.getElementById("login_email").value,
-      password: document.getElementById("login_pass").value
-    })
-  })
-  .then(r=>r.json())
-  .then(d=>{
-    if(d.status==="admin"){
-      isAdmin = true;
-      userEmail = "";
-      alert("Admin Login");
-      showPage("dashboard");
-    }
-    else if(d.status==="user"){
-      isAdmin = false;
-      userEmail = d.email;   // 🔥 auto email
-      alert("User Login");
-      showPage("dashboard");
-    }
-    else{
-      alert("Login Failed");
-    }
-  });
-}
+# ---------------- DATABASE ----------------
+def init_db():
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
 
-/* LOAD CHILDREN */
-function loadChildren(){
-  fetch(API+"/get_children")
-  .then(r=>r.json())
-  .then(data=>{
-    let container = document.getElementById("childrenContainer");
-    container.innerHTML="";
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        email TEXT,
+        password TEXT
+    )
+    """)
 
-    data.forEach(c=>{
-      let card=document.createElement("div");
-      card.className="childCard";
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS children(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        age INTEGER,
+        place TEXT,
+        image_path TEXT
+    )
+    """)
 
-      let delBtn = isAdmin
-        ? `<button onclick="deleteChild(${c.id})">Delete</button>`
-        : "";
+    conn.commit()
+    conn.close()
 
-      card.innerHTML = `
-        <h4>${c.name}</h4>
-        <p>Age: ${c.age}</p>
-        <p>${c.place}</p>
-        ${delBtn}
-      `;
+init_db()
 
-      container.appendChild(card);
-    });
-  });
-}
+# ---------------- EMAIL ----------------
+def send_email_alert(name, age, place, receiver):
+    sender = os.environ.get("EMAIL_USER")
+    password = os.environ.get("EMAIL_PASS")
 
-/* DELETE */
-function deleteChild(id){
-  if(!confirm("Delete child?")) return;
+    if not sender or not password:
+        print("Email ENV not set")
+        return
 
-  fetch(API+"/delete_child/"+id,{method:"DELETE"})
-  .then(()=>{
-    alert("Deleted");
-    loadChildren();
-  });
-}
+    msg = MIMEText(f"""
+MATCH FOUND!
 
-/* REGISTER CHILD */
-function registerChild(){
-  let f=new FormData();
-  f.append("name", document.getElementById("child_name").value);
-  f.append("age", document.getElementById("child_age").value);
-  f.append("place", document.getElementById("child_place").value);
-  f.append("photo", document.getElementById("child_photo").files[0]);
+Name: {name}
+Age: {age}
+Place: {place}
+""")
 
-  fetch(API+"/register_child",{method:"POST",body:f})
-  .then(r=>r.json())
-  .then(d=>{
-    alert(d.message || "Registered");
-    showPage("dashboard");
-  });
-}
+    msg["Subject"] = "Missing Child Found"
+    msg["From"] = sender
+    msg["To"] = receiver
 
-/* IMAGE CHECK */
-function crossCheck(){
-  let f=new FormData();
-  f.append("photo", document.getElementById("check_photo").files[0]);
-  f.append("user_email", userEmail);
+    try:
+        server = smtplib.SMTP("smtp.gmail.com",587)
+        server.starttls()
+        server.login(sender,password)
+        server.send_message(msg)
+        server.quit()
+    except Exception as e:
+        print("Email failed:", e)
 
-  fetch(API+"/crosscheck",{method:"POST",body:f})
-  .then(r=>r.json())
-  .then(d=>{
-    showPage("result");
+# ---------------- FACE ----------------
+def extract_face(path):
+    img = cv2.imread(path)
+    if img is None: return None
 
-    let resultText = document.getElementById("result_text");
-    let details = document.getElementById("family_details");
+    gray = cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(gray,1.3,5)
 
-    if(d.status==="found"){
+    if len(faces)==0: return None
 
-      alert("MATCH FOUND ✅");
+    x,y,w,h = faces[0]
+    face = gray[y:y+h,x:x+w]
+    return cv2.resize(face,(200,200))
 
-      resultText.innerHTML =
-        d.match_type==="age_progression"
-        ? "AGE PROGRESSION MATCH FOUND"
-        : "MATCH FOUND";
+# ---------------- AGE PROGRESSION ----------------
+def age_progression(face):
+    blur = cv2.GaussianBlur(face,(5,5),0)
+    sharp = cv2.addWeighted(face,1.5,blur,-0.5,0)
+    return cv2.equalizeHist(sharp)
 
-      details.innerHTML =
-        `Name: ${d.name}<br>Age: ${d.age}<br>Place: ${d.place}`;
-    }
+# ---------------- TRAIN ----------------
+def train_model(use_aged=False):
+    recognizer = cv2.face.LBPHFaceRecognizer_create()
+    faces, labels = [], []
 
-    else if(d.status==="no face"){
-      alert("NO FACE DETECTED ❌");
-      resultText.innerHTML="NO FACE DETECTED";
-      details.innerHTML="";
-    }
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("SELECT id,image_path FROM children")
+    rows = cur.fetchall()
+    conn.close()
 
-    else{
-      alert("NOT FOUND ❌");
-      resultText.innerHTML="NOT FOUND";
-      details.innerHTML="";
-    }
-  });
-}
+    for r in rows:
+        img = cv2.imread(r[1],0)
+        if img is None: continue
 
-/* VIDEO DETECTION */
-function detectVideo(){
-  let f=new FormData();
-  f.append("video", document.getElementById("video_file").files[0]);
+        faces.append(img)
+        labels.append(r[0])
 
-  fetch(API+"/detect_video",{method:"POST",body:f})
-  .then(r=>r.json())
-  .then(d=>{
-    if(d.status==="found"){
-      alert("MATCH FOUND IN VIDEO 🎯");
-      console.log(d.results);
-    } 
-    else{
-      alert("NO MATCH FOUND ❌");
-    }
-  });
-}
+        if use_aged:
+            aged = age_progression(img)
+            faces.append(aged)
+            labels.append(r[0])
+
+    if len(faces)==0: return None
+
+    recognizer.train(faces,np.array(labels))
+    return recognizer
+
+# ---------------- SIGNUP ----------------
+@app.route("/signup",methods=["POST"])
+def signup():
+    data = request.json
+
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("INSERT INTO users(name,email,password) VALUES(?,?,?)",
+                (data["name"],data["email"],data["password"]))
+    conn.commit()
+    conn.close()
+
+    return jsonify({"message":"Account created"})
+
+# ---------------- LOGIN ----------------
+@app.route("/login",methods=["POST"])
+def login():
+    data = request.json
+
+    # ADMIN
+    if data["email"] == "missing child" and data["password"] == "ths345$":
+        return jsonify({"status":"admin"})
+
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE email=? AND password=?",
+                (data["email"],data["password"]))
+    user = cur.fetchone()
+    conn.close()
+
+    if user:
+        return jsonify({"status":"user","email":user[2]})
+    else:
+        return jsonify({"status":"fail"})
+
+# ---------------- REGISTER CHILD ----------------
+@app.route("/register_child",methods=["POST"])
+def register_child():
+    name = request.form["name"]
+    age = request.form["age"]
+    place = request.form["place"]
+    photo = request.files["photo"]
+
+    path = os.path.join(DATASET,photo.filename)
+    photo.save(path)
+
+    face = extract_face(path)
+    if face is None:
+        return jsonify({"message":"No face detected"})
+
+    cv2.imwrite(path,face)
+
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("INSERT INTO children(name,age,place,image_path) VALUES(?,?,?,?)",
+                (name,age,place,path))
+    conn.commit()
+    conn.close()
+
+    return jsonify({"message":"Child registered"})
+
+# ---------------- GET CHILDREN ----------------
+@app.route("/get_children")
+def get_children():
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("SELECT id,name,age,place FROM children")
+    rows = cur.fetchall()
+    conn.close()
+
+    return jsonify([{
+        "id":r[0],
+        "name":r[1],
+        "age":r[2],
+        "place":r[3]
+    } for r in rows])
+
+# ---------------- DELETE ----------------
+@app.route("/delete_child/<int:id>",methods=["DELETE"])
+def delete_child(id):
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM children WHERE id=?", (id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"message":"Deleted"})
+
+# ---------------- IMAGE CROSSCHECK ----------------
+@app.route("/crosscheck",methods=["POST"])
+def crosscheck():
+    photo = request.files["photo"]
+    user_email = request.form.get("user_email")
+
+    path = os.path.join(UPLOAD_FOLDER,photo.filename)
+    photo.save(path)
+
+    face = extract_face(path)
+    if face is None:
+        return jsonify({"status":"no face"})
+
+    model = train_model(False)
+    aged_model = train_model(True)
+
+    if model is None:
+        return jsonify({"status":"database empty"})
+
+    label,conf = model.predict(face)
+    label2,conf2 = aged_model.predict(face)
+
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("SELECT name,age,place FROM children WHERE id=?",(label,))
+    row = cur.fetchone()
+    conn.close()
+
+    if conf < 60:
+        if user_email:
+            send_email_alert(row[0],row[1],row[2],user_email)
+
+        return jsonify({
+            "status":"found",
+            "match_type":"normal",
+            "name":row[0],
+            "age":row[1],
+            "place":row[2]
+        })
+
+    elif conf2 < 75:
+        if user_email:
+            send_email_alert(row[0],row[1],row[2],user_email)
+
+        return jsonify({
+            "status":"found",
+            "match_type":"age_progression",
+            "name":row[0],
+            "age":row[1],
+            "place":row[2]
+        })
+
+    else:
+        return jsonify({"status":"not found"})
+
+# ---------------- VIDEO DETECTION ----------------
+@app.route("/detect_video",methods=["POST"])
+def detect_video():
+    video = request.files["video"]
+    path = os.path.join(UPLOAD_FOLDER,video.filename)
+    video.save(path)
+
+    cap = cv2.VideoCapture(path)
+    model = train_model()
+
+    if model is None:
+        return jsonify({"status":"no data"})
+
+    found = False
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray,1.3,5)
+
+        for (x,y,w,h) in faces:
+            face = gray[y:y+h,x:x+w]
+            face = cv2.resize(face,(200,200))
+
+            label, conf = model.predict(face)
+
+            if conf < 60:
+                found = True
+                break
+
+        if found:
+            break
+
+    cap.release()
+
+    return jsonify({"status":"found" if found else "not found"})
+
+# ---------------- ROOT ----------------
+@app.route("/")
+def home():
+    return "API Running"
+
+# ---------------- RUN ----------------
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT",5000))
+    app.run(host="0.0.0.0", port=port)
