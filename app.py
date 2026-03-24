@@ -31,6 +31,39 @@ def init_db():
 
 init_db()
 
+@app.route("/signup", methods=["POST"])
+def signup():
+    data = request.json
+
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+
+    cur.execute("INSERT INTO users(name,email,password) VALUES(?,?,?)",
+                (data["name"], data["email"], data["password"]))
+
+    conn.commit()
+    conn.close()
+
+    return jsonify({"status": "success"})
+
+@app.route("/login", methods=["POST"])
+def login():
+    data = request.json
+
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM users WHERE email=? AND password=?",
+                (data["email"], data["password"]))
+
+    user = cur.fetchone()
+    conn.close()
+
+    if user:
+        return jsonify({"status":"user","email":user[2]})
+
+    return jsonify({"status":"fail"})
+
 # ---------------- FACE EXTRACTION ----------------
 def extract_face(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
