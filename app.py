@@ -260,6 +260,29 @@ def crosscheck():
         print("CROSSCHECK ERROR:", e)
         return jsonify({"status":"error"})
 
+@app.route("/crosscheck_video", methods=["POST"])
+def crosscheck_video():
+    file = request.files["video"]
+    path = os.path.join(UPLOAD_FOLDER, file.filename)
+    file.save(path)
+
+    cap = cv2.VideoCapture(path)
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # detect face in each frame (same logic as image)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray,1.3,5)
+
+        if len(faces) > 0:
+            # process like crosscheck
+            return jsonify({"status":"found", "name":"...", "age":"...", "place":"..."})
+
+    return jsonify({"status":"not found"})
+
 # ---------------- ROOT ----------------
 @app.route("/")
 def home():
