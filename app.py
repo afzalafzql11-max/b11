@@ -119,6 +119,8 @@ def signup():
 def login():
     data = request.json
 
+    if not data:
+        return jsonify({"status": "fail", "message": "No data received"}), 400
     # ADMIN LOGIN
     if data["email"] == ADMIN_EMAIL and data["password"] == ADMIN_PASSWORD:
         return jsonify({"status": "admin", "email": ADMIN_EMAIL})
